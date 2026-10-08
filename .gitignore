@@ -1,0 +1,13 @@
+# build outputs
+*.exe
+*.pdb
+*.obj
+*.o
+holocrypto_bench_n16.cpp
+
+# python
+__pycache__/
+*.pyc
+
+# local drafts
+*.docx
