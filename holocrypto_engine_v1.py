@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import hashlib
 import itertools
+import numbers
 import random
 import sys
 import time
@@ -585,7 +586,35 @@ def dt_to_pd(dt: list[int], max_n: int = 16) -> list[tuple[int, int, int, int]]:
 
 
 # --------------------------- braids -> upright / PD ---------------------------
+class InvalidBraid(ValueError):
+    """The input is not a braid word at all (bad letter / bad strand count), as opposed to a braid whose
+    closure is a link (plain ValueError)."""
+
+
+MAX_CROSSINGS = 2000     # DoS guard: 800 crossings already take ~13 s (8 points) and memory grows with n^2
+
+
+def validate_braid(word, m: int) -> None:
+    """Reject anything that is not a word in sigma_k^{+-1}, 1 <= k <= m-1, with a clear ValueError.
+
+    Without this, a letter 0 gave a misleading 'several components' error, |k| >= m a bare KeyError, and
+    floats / bools were accepted silently (1.0 == 1, True == 1)."""
+    if isinstance(m, bool) or not isinstance(m, numbers.Integral) or m < 2:
+        raise InvalidBraid(f"number of strands must be an int >= 2, got {m!r}")
+    if len(word) > MAX_CROSSINGS:
+        raise InvalidBraid(f"word has {len(word)} letters; the limit is MAX_CROSSINGS = {MAX_CROSSINGS}")
+    if len(word) == 0:
+        raise InvalidBraid("empty braid word (that is the unlink, not a knot)")
+    for i, g in enumerate(word):
+        if isinstance(g, bool) or not isinstance(g, numbers.Integral):
+            raise InvalidBraid(f"braid letter #{i} must be an int, got {g!r}")
+        if g == 0 or abs(g) > m - 1:
+            raise InvalidBraid(f"braid letter #{i} = {g} is not a generator: need 1 <= |k| <= {m - 1}")
+
+
 def _walk_braid(word: list[int], m: int, p: int):
+    word = list(word)       # a one-shot iterator would be exhausted after the first pass -> endless loop below
+    validate_braid(word, m)
     steps, arcs, x, strands = [], 0, p, 0         # steps: (letter, goes over?, preceding closure arcs)
     while True:
         pos = x
@@ -609,6 +638,7 @@ def braid_to_upright(word: list[int], m: int, p: int = 1, name: str = "") -> Kno
     """Closure of the braid (σ_k^{±1} = ±k, m strands) cut at the closing arc of strand p.
 
     Direct, no planarity needed: the strands go up, each closing arc (on the right) contributes φ = -1."""
+    word = list(word)
     steps = _walk_braid(word, m, p)
     over, under = {}, {}
     for idx, (c, is_over, _) in enumerate(steps, start=1):
@@ -788,7 +818,8 @@ def _inverse_fast(M: np.ndarray, q: int) -> tuple[np.ndarray, np.ndarray]:
         return np.array([r[0] for r in res], dtype=np.int64), np.stack([r[1] for r in res])
 
 
-def theta_eval_np(d: KnotDiagram, T1: int, T2: int, q: int = Q31, profile: dict | None = None) -> int:
+def theta_eval_np(d: KnotDiagram, T1: int, T2: int, q: int = Q31, profile: dict | None = None,
+                  return_deltas: bool = False):
     """θ(D)(T1,T2) ∈ F_q, same as theta_eval but with vectorised linear algebra."""
     n, m = d.n, 2 * d.n + 1
     t0 = time.perf_counter()
@@ -809,10 +840,12 @@ def theta_eval_np(d: KnotDiagram, T1: int, T2: int, q: int = Q31, profile: dict 
         mats.append(A)
     dets, invs = _inverse_fast(np.stack(mats), q)
     res = [(int(dets[k]), invs[k]) for k in range(3)]
-    G, Del = [], 1
+    G, Del, deltas = [], 1, []
     for T, (det, inv) in zip(Ts, res):
         G.append(inv)
-        Del = Del * pow(T, d.delta_exponent, q) % q * det % q
+        dk = pow(T, d.delta_exponent, q) * det % q          # Delta(T) mod q
+        deltas.append(dk)
+        Del = Del * dk % q
     t1 = time.perf_counter()
     G1, G2, G3 = G
     g = lambda M, a, b: _Mod(M[a, b], q)
@@ -845,7 +878,8 @@ def theta_eval_np(d: KnotDiagram, T1: int, T2: int, q: int = Q31, profile: dict 
     t2 = time.perf_counter()
     if profile is not None:
         profile["inversions"], profile["F1+F2+F3"] = t1 - t0, t2 - t1
-    return th0 % q * Del % q
+    th = th0 % q * Del % q
+    return (th, deltas) if return_deltas else th
 
 
 # ==========================================================================

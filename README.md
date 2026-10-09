@@ -220,6 +220,18 @@ I tested this instead of just asserting it. For each `(m strands, n crossings)`,
 
 **What this is not:** it is an empirical trend on 150–300 samples per cell, not a proof of an asymptotic law, and "decays toward ~0" should be read as *"measured to be negligible at the sizes tested"*. It also does not say the surviving knots are *secure*, only that they are nontrivial and chiral.
 
+### 3.7 · Optional v3 digest: also bind `Δ`
+
+`θ = Δ(T₁)Δ(T₂)Δ(T₃)·(ΣF₁+ΣF₂+ΣF₃)`, and the v2 digest hashes only `θ`. Every knot with `θ = 0` (the unknot, amphichiral knots, and every connected sum `K # K*`) therefore has the **same** digest. The optional **v3** digest hashes, at each of the K points, the three Alexander values and then `θ`:
+
+```text
+v3 = SHA-256("holocrypto-v3/alexander+theta" || q || K || seed || Δ(T₁_k) Δ(T₂_k) Δ(T₃_k) θ_k for k = 0..K-1)
+```
+
+with 8-byte big-endian integers, as in v2. It costs nothing extra (`Δ` is already computed inside `θ`), it keeps the invariance (600 random equivalent-diagram checks, 0 mismatches), and `K # K*` no longer collapses onto the unknot digest (see vectors 16 and 17 in [`TEST_VECTORS.md`](TEST_VECTORS.md)).
+
+**What it does not fix:** colliding knots that share the same `Δ` (for instance `Δ = 1` for Conway and Kinoshita–Terasaka), the connected-sum families built from them, and the public-`θ` preimage of limitation 11 (the attacker would also have to match `Δ`, which this work did not attempt). It is **not** compatible with the v2 digest, and v2 stays the default everywhere. Access: `holocrypto_bench --verify "..." --v3` and `digest_v3()` in `holocrypto_multipoint_ref.py`. The benchmark and the key generator still use v2.
+
 ---
 
 ## 4 · Benchmark results
@@ -262,7 +274,7 @@ The slowdown is just under 8× because closure construction and SHA-256 are paid
 - These are **small** knots (5–7 crossings). Cost grows roughly as O(n³) per point, so production sizes (§3.6) will be far slower than these figures. They have **not** been benchmarked here.
 - The final *checksum* (`c9647977678b33c0`) is identical across all runs and between 1 and 16 threads: it verifies that the result does not depend on parallelism.
 - The reference Python engine, plus an independent re-implementation of the multi-point digest, produce **exactly the same digests** as the C++ code (§3.4).
-- At this toy scale, single-point collisions are not even observable: among the 39,928 usable keys the expected number of colliding pairs at 31 bits is ≈ n²/2q ≈ 0.4. The multi-point change is about *scaling*, not about fixing something visible in this benchmark.
+- The 39,928 usable keys are usable **braid words**, not distinct keys. An exhaustive count of the digests they produce found only **~20 distinct ones** (2 at length 5, 18 at length 7). Almost every coincidence is the *same knot* written as a different braid, which is the invariance working as intended. The birthday estimate n²/2q (≈ 0.4 pairs) treats words as independent random values and does **not** apply here. The practical consequence is stronger than "enumerable in a second": a brute-force preimage at these parameters needs about 20 candidates. The multi-point change is about *scaling*, not about fixing something visible in this benchmark.
 
 ---
 
@@ -283,7 +295,10 @@ holocrypto_bench.exe -t 1 --lens 5,6,7          # single thread
 holocrypto_bench.exe -k 1                       # single point, for the 8x comparison
 holocrypto_bench.exe --seed 0xC0FFEE            # different public seed -> different 8 points
 holocrypto_bench.exe --verify "1 2 3 -1 2 1 3"  # the 8 thetas + digest of one braid
+holocrypto_bench.exe --verify "1 2 3 -1 2 1 3" --v3   # optional v3 digest (also hashes Delta, §3.7)
 ```
+
+Invalid arguments (letters outside the generators, bad `-k`, `--seed`, unknown options) are rejected with exit code 2.
 
 Python references:
 
@@ -293,6 +308,8 @@ python holocrypto_multipoint_ref.py "1 2 3 -1 2 1 3"
 
 python theta_zero_density.py 300               # the θ = 0 density experiment of §3.6
 ```
+
+API notes for `holocrypto_multipoint_ref.py`: `digest(word, m, K, seed)` returns `(thetas, hash)` and accepts any word whose closure is a knot, including `θ = 0` knots. `digest_checked()` returns the same value but raises `DegenerateKey` for the `θ = 0` class. `digest_v3()` is the optional digest of §3.7. Inputs are validated (`InvalidBraid`, a `MAX_CROSSINGS = 2000` cap in the engine, `K` in 1..255). For real keys pass `random.SystemRandom()` to `random_braid` (limitation 13).
 
 The Conway / Kinoshita–Terasaka self-attack of §7 needs a build that accepts 13+ crossings (the default build caps at 12):
 
@@ -314,14 +331,17 @@ So that nobody has to "discover" them as if they were a finding:
 |:-:|---|---|
 | 1 | **SHA-256 is doing the heavy lifting** | In its current PoC (hash) form, **SHA-256 hides the topology**: anyone who sees only the digest must invert SHA-256, and the hardness of Θ plays no role. The real challenge for the community is to **break the evaluation of Θ assuming the raw `F_q` values `(θ₀,…,θ₇)` and the points were public**, as would happen in a digital signature. Under that assumption there is no SHA-256 shield, and every security statement in this document is unproven. |
 | 2 | **The 248-bit figure is an upper bound** | `8 × 31` bits is the size of the output space of the 8-vector. The 8 values are evaluations of one algebraic object, so they are *not* independent, and uniformity is **unproven**. The real collision resistance could be far lower; that is what §7 asks you to test. |
-| 3 | **Invariant collisions are unavoidable in principle** | Different knots with equal Θ collide at any `K`; adding points does not help. Whether such pairs exist is open: the one mutant pair tested (Conway / Kinoshita–Terasaka) is separated by `θ` (§7), but one pair proves nothing about the rest. |
+| 3 | **Invariant collisions exist and some are constructive** | Different knots with equal Θ collide at any `K`; adding points does not help. The self-audit of §7 (self-audit) found them: genuine collisions between inequivalent prime knots in the Hoste–Thistlethwaite table (about 4 % of the knots at 13–14 crossings share `θ` with another knot), `K # K*` having the digest of the unknot, and an explicit second-preimage family built from knots with `Δ = 1`. The Conway / Kinoshita–Terasaka pair itself *is* separated by `θ` (§7). |
 | 4 | **One-wayness is unproven** | Security rests on the *hypothesis* that inverting the evaluation (θ-vector → knot) is hard. **It has not been shown to be NP-hard** or anything similar. We simply do not know of a shortcut. The evaluation points are public, which also gives an attacker 8 equations about one object (§7, line 3). |
 | 5 | **From OWF to signature/KEM is not done** | Hash-based signatures from a OWF are a standard route but are *not implemented*. A KEM needs a trapdoor and **no construction is proposed** (§2.3). |
-| 6 | **Toy key space: the demo hash is trivially invertible** | 4 strands and 5–7 crossings give ≈ 40,000 usable keys. At the ≈ 58,000 evaluations/s of §4, **enumerating every one of them takes about a second**, so anyone can find a preimage of a demo digest by brute force. The demo parameters show *speed*, not *security*. The 64% rejection rate shrinks with size (§3.6) but production-size cost and security are **not measured**. |
+| 6 | **Toy key space: the demo hash is trivially invertible** | 4 strands and 5–7 crossings give ≈ 40,000 usable braid words, which represent only **~20 distinct digests** (§4.4). At the ≈ 58,000 evaluations/s of §4, **enumerating every one of them takes about a second**, so anyone can find a preimage of a demo digest by brute force. The demo parameters show *speed*, not *security*. The 64% rejection rate shrinks with size (§3.6) but production-size cost and security are **not measured**. |
 | 7 | **The `θ = 0` trend is empirical** | The decay in §3.6 is measured on 150–300 samples per cell, not proven. |
 | 8 | **Θ is neither new nor mine** | The invariant is due to Bar-Natan and van der Veen (2025). This repository's contribution is **the OWF/hash construction**: a knot generator with a parity rule, multi-point evaluation over `F_q`, and masking. |
 | 9 | **Algebraic structure** | `θ(K*) = −θ(K)` is an exact linear relation; there may be more (see §7). |
 | 10 | **Quantum resistance is a hypothesis** | "Post-quantum" here means *"no quantum attack is known"*. With 31-bit `q` the field is trivially small for any generic attack on `θ` itself; real parameters would need a much larger `q`. |
+| 11 | **If `θ` is public, a first preimage of an arbitrary vector can be built** | Limitation 1 asks the community to attack the raw `(θ₀,…,θ₇)`. The self-audit (§7 (self-audit)) did it: for knots with `Δ = 1`, `θ` is additive under connected sum and the mirror image gives `−θ`, so a target vector can be reached by lattice reduction (LLL) over a library of known `Δ = 1` knots. With 61 such knots this was done end to end with the real engine for `K = 1, 2, 3` points (181, 965 and 3,567 crossings) and an arbitrary random target. For `K = 8` it needs a few hundred such knots (roughly 164,000 crossings in the audit's estimate, not run through the engine). SHA-256 in front of `θ`, as in this PoC, blocks it; any scheme that exposes `θ` does not. |
+| 12 | **Orientation and the degenerate class** | `θ` does not depend on the orientation of the knot (reversing the word gives the same `θ`), so a knot and its reverse share a digest. `digest()` accepts any word whose closure is a knot, including `θ = 0` knots (the unknot, amphichiral knots, every `K # K*`, which all share one digest); `digest_checked()` raises `DegenerateKey` for them. The optional v3 digest (§3.7) separates `K # K*` from the unknot but not knots that share `Δ`. |
+| 13 | **Key generation needs a real RNG** | `random_braid(n, m, rng)` takes any `random.Random`. For real keys pass `random.SystemRandom()` (it works unchanged); a seeded Mersenne Twister is predictable. |
 
 ---
 
@@ -334,7 +354,7 @@ If it holds up, that is good to know. If it does not, I would much rather find o
 ### Attack lines I care about
 
 1. **Collisions.** Two distinct knots (or braids) with the same digest under the same `(q, K, seed)`. Collisions between *mirror images or equivalent braids* are expected and uninteresting; I want **structural** collisions between knots that should differ.
-2. **Mutations.** Are there families of knots (mutants, satellites, braids with symmetries) where `θ` coincides *by construction* at all 8 points and can be generated at will? (A first self-test on Conway / Kinoshita–Terasaka found **no** collision; see the next subsection. One pair is not a family.)
+2. **Mutations.** Are there families of knots (mutants, satellites, braids with symmetries) where `θ` coincides *by construction* at all 8 points and can be generated at will? **Families exist and are explicit** (found by the self-audit below): `K # K*` collapses onto the unknot digest, and connected sums with `Δ = 1` knots give constructive second preimages. The Conway / Kinoshita–Terasaka pair itself is separated (next subsection). What is still open is whether there are cheaper or more general families than the ones listed.
 3. **Relations between the 8 points.** The evaluation points are public. Does the vector `(θ₀,…,θ₇)` satisfy algebraic constraints (interpolation, rational-function relations) that make it far less than 248 bits, or let one predict `θ_j` from the other seven?
 4. **Alexander forgery.** Alexander polynomials can be forged or tailor-made using satellite knots and other known constructions (e.g. a satellite whose pattern has winding number 0 has the Alexander polynomial of the pattern, whatever the companion). Since `Δ` enters `θ` as the factor `Δ(T₁)Δ(T₂)Δ(T₃)`, a main attack vector is to investigate **whether the perturbation `θ` provides enough separation to prevent forgeries**: given a target `Θ`-vector, can an attacker build a knot with the right `Δ` by construction and then adjust `θ`? This is an attack hypothesis, not a demonstrated result.
 5. **Linearity and algebraic relations between knots.** Beyond `θ(K*) = −θ(K)`: do linear or polynomial relations exist between the `θ` of related knots (connected sums, crossing changes, twists) that would let one predict digests without evaluating?
@@ -364,7 +384,23 @@ The two words come from the CRC Concise Encyclopedia of Mathematics; both knots 
 - **What this does not show:** it is a *negative* result for one attack on one pair, found by the author. It is not a proof that Θ separates all mutants, it says nothing about satellite constructions or about forging a target `Θ`-vector, and nobody else has reviewed it.
 - **Reproduce:** `python mutant_test.py` (needs a build with `kMaxN ≥ 13`; instructions are at the top of the script). The exact digests are in [`TEST_VECTORS.md`](TEST_VECTORS.md).
 
-Mutants from other families, higher braid index, and prescribed-Δ constructions are still open.
+Mutants from other families and higher braid index are still open (pretzel mutants `P(2,3,5,7)`, `P(3,2,5,7)` and `P(3,5,2,7)` are also separated by `θ`). Constructions built from `Δ = 1` knots turned out *not* to be separated; see the next subsection.
+
+### Second self-attack: a four-hour self-audit (October 2026)
+
+After the first release I ran a systematic audit of my own code and construction (SnapPy 3.1.1, Spherogram, knot Floer homology, exact arithmetic, a lattice-reduction library). The audit scripts are not part of this repository. Results, in order of importance:
+
+| Finding | Result |
+|---|---|
+| **Second preimage by connected sum** | For `D` = Conway 11n34 or Kinoshita–Terasaka 11n42 (`Δ = 1`), `θ` is additive under connected sum, so `D # D*` has the digest of the unknot and **`K₀ # D # D*` has the same digest as `K₀` for any knot `K₀`**. Verified on 10 of 10 cases with 25–34 crossings. The general formula is `θ(K#J) = P_J·θ_K + P_K·θ_J` with `P = Δ(T₁)Δ(T₂)Δ(T₃)`. |
+| **`K # K*`** | `θ = 0` at every point, so the digest equals the unknot digest (12 of 12 cases). The key generator rejects `θ = 0`; `digest()` does not (`digest_checked()` does). The optional v3 digest (§3.7) separates this case. |
+| **Amplification** | From one genuine colliding pair `A, B` with equal `Δ`, the knots `A # J` and `B # J` collide for every `J`. |
+| **Collisions between inequivalent prime knots** | In the Hoste–Thistlethwaite table: 0 up to 10 crossings; 18 pairs at 11–12 crossings (15 look like mutants, 3 have a different hyperbolic volume); about **4 %** of the knots at 13–14 crossings share `θ` with another knot (12 of 205 classes at 13 and 73 of 928 at 14 have different volume). `θ` separates roughly 1.6–2× more classes than the Alexander polynomial, but it is not a complete invariant. |
+| **Public-`θ` preimage** | Limitation 11. |
+| **Implementation robustness** | Out-of-range letters in the C++ `--verify` (out-of-bounds access, and `"257"` wrapping to `1`), an infinite loop when the word was passed as a generator in Python, no length cap in `digest()`, `K = 0` giving a constant digest, and a C++ CLI that silently accepted junk. All fixed **without changing any valid digest**; the reference hash and the benchmark checksum are unchanged. |
+| **What held up** | Invariance under braid and Markov moves (0 failures in over 1,000 moves), C++ and Python agreeing bit for bit on about 280,000 arithmetic and hash cases, all test vectors, and the §3.6 table. No error in the mathematics or the arithmetic was found. |
+
+None of this contradicts the PoC as declared (SHA-256 in front, not a SHA-256 replacement), but it answers attack line 2 and limitation 1 concretely, and it shows that a design which exposes `θ`, or that relies on one word meaning one key, needs more than `θ` alone. This is the author's own work and has not been reviewed by anyone else.
 
 ### How to report a finding
 

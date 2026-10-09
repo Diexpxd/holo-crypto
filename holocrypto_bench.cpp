@@ -16,11 +16,13 @@
 //
 // Usage: holocrypto_bench [-t THREADS] [-k POINTS] [--seed N] [--lens 5,6,7,8]
 //        holocrypto_bench --verify "1 -2 3 1 2"        (prints the K thetas and the hash of a word)
+//        holocrypto_bench --verify "1 -2 3 1 2" --v3   (optional v3 digest: also hashes Delta(T1..T3) per point)
 //        holocrypto_bench --selftest                    (SHA-256 test vectors)
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cerrno>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -205,7 +207,7 @@ bool detInv(Mat A, Mat Inv, int m, u32& det) {
 // ============================================================================
 // 5. theta(D)(T1, T2) in F_q. False if T2 = 1 or T is a root of Delta (singular matrix).
 // ============================================================================
-bool thetaEval(const Knot& d, u32 T1, u32 T2, u32& theta) {
+bool thetaEval(const Knot& d, u32 T1, u32 T2, u32& theta, u32* deltas = nullptr) {
     const int n = d.n, m = 2 * n + 1;
     if (T2 == 1 || T1 == 0 || T2 == 0) return false;
     const u32 T3 = mul(T1, T2);
@@ -228,7 +230,9 @@ bool thetaEval(const Knot& d, u32 T1, u32 T2, u32& theta) {
         }
         u32 det;
         if (!detInv(A, G[nu], m, det)) return false;
-        Del = mul(mul(Del, ed >= 0 ? power(T, ed) : power(Ti, -ed)), det);
+        const u32 dk = mul(ed >= 0 ? power(T, ed) : power(Ti, -ed), det);      // Delta(T) in F_q
+        if (deltas) deltas[nu] = dk;
+        Del = mul(Del, dk);
     }
     const Mat &G1 = G[0], &G2 = G[1], &G3 = G[2];
 
@@ -296,6 +300,7 @@ bool thetaEval(const Knot& d, u32 T1, u32 T2, u32& theta) {
 constexpr int kMaxK = 16;
 constexpr char kDomPoint[] = "holocrypto-v2/point";
 constexpr char kDomTheta[] = "holocrypto-v2/theta8";
+constexpr char kDomTheta3[] = "holocrypto-v3/alexander+theta";   // optional v3 digest (also binds Delta)
 
 inline void putBE(uint8_t* p, u64 v) { for (int b = 0; b < 8; ++b) p[b] = static_cast<uint8_t>(v >> (56 - 8 * b)); }
 inline u64 getBE(const uint8_t* p) { u64 v = 0; for (int b = 0; b < 8; ++b) v = (v << 8) | p[b]; return v; }
@@ -335,6 +340,30 @@ void holocryptoHash(const Params& P, const u32 th[kMaxK], uint8_t out[32]) {
     putBE(msg + dl + 16, P.seed);
     for (int k = 0; k < P.K; ++k) putBE(msg + dl + 24 + 8 * k, th[k]);
     Sha256::hash(msg, dl + 24 + 8 * P.K, out);
+}
+
+// v3 (optional, --verify --v3 only): SHA-256( "holocrypto-v3/alexander+theta" || q || K || seed ||
+//   for each point k: Delta(T1_k), Delta(T2_k), Delta(T3_k), theta_k ), 8-byte big-endian integers.
+// Same thetas as v2; the Alexander values are hashed too, so K # K* (theta = 0) no longer collapses onto the
+// unknot digest. It does NOT separate knots that share Delta (e.g. Delta = 1: Conway, Kinoshita-Terasaka).
+bool thetaMultiV3(const Knot& d, const Params& P, u32 th[kMaxK], u32 dl[kMaxK][3]) {
+    for (int k = 0; k < P.K; ++k)
+        if (!thetaEval(d, P.T1[k], P.T2[k], th[k], dl[k])) return false;
+    return true;
+}
+
+void holocryptoHashV3(const Params& P, const u32 th[kMaxK], const u32 dl[kMaxK][3], uint8_t out[32]) {
+    constexpr size_t dn = sizeof(kDomTheta3) - 1;
+    uint8_t msg[dn + 24 + 32 * kMaxK];
+    std::memcpy(msg, kDomTheta3, dn);
+    putBE(msg + dn, Q);
+    putBE(msg + dn + 8, static_cast<u64>(P.K));
+    putBE(msg + dn + 16, P.seed);
+    for (int k = 0; k < P.K; ++k) {
+        uint8_t* w = msg + dn + 24 + 32 * k;
+        putBE(w, dl[k][0]); putBE(w + 8, dl[k][1]); putBE(w + 16, dl[k][2]); putBE(w + 24, th[k]);
+    }
+    Sha256::hash(msg, dn + 24 + 32 * P.K, out);
 }
 
 // ============================================================================
@@ -390,24 +419,46 @@ Stats runLength(int len, int threads, const Params& P, double& secs) {
     return s;
 }
 
-std::vector<int> parseInts(const std::string& s, char sep) {
-    std::vector<int> v;
+// Strict integer list parser: every token must be a complete decimal integer within [lo, hi]; no silent
+// wrap-around (atoi + int8_t cast turned "257" into 1 and "-256" into 0). Returns false and prints why.
+bool parseIntList(const std::string& s, char sep, long lo, long hi, const char* what, std::vector<int>& out) {
+    out.clear();
     std::string tok;
     std::istringstream is(s);
-    while (std::getline(is, tok, sep)) if (!tok.empty()) v.push_back(std::atoi(tok.c_str()));
-    return v;
+    while (std::getline(is, tok, sep)) {
+        if (tok.empty()) continue;
+        char* end = nullptr;
+        errno = 0;
+        long x = std::strtol(tok.c_str(), &end, 10);
+        if (end == tok.c_str() || *end != '\0' || errno == ERANGE || x < lo || x > hi) {
+            std::fprintf(stderr, "error: invalid %s '%s' (expected an integer in [%ld, %ld])\n", what, tok.c_str(), lo, hi);
+            return false;
+        }
+        out.push_back(static_cast<int>(x));
+    }
+    return true;
 }
 
-int cmdVerify(const std::string& wordStr, const Params& P) {
-    std::vector<int> v = parseInts(wordStr, ' ');
+int cmdVerify(const std::string& wordStr, const Params& P, bool v3) {
+    std::vector<int> v;
+    // letters must be sigma_k^{+-1} with 1 <= k <= kStrands-1 (0 and |k| >= kStrands are not generators)
+    if (!parseIntList(wordStr, ' ', -(kStrands - 1), kStrands - 1, "braid letter", v)) return 2;
+    for (int x : v) if (x == 0) { std::fprintf(stderr, "error: braid letter 0 is not a generator\n"); return 2; }
+    if (v.size() > static_cast<size_t>(kMaxN)) {
+        std::fprintf(stderr, "error: word has %zu letters; this build supports at most %d crossings\n", v.size(), kMaxN);
+        return 2;
+    }
     std::vector<int8_t> w(v.begin(), v.end());
     Knot K;
     if (!braidToKnot(w.data(), static_cast<int>(w.size()), kStrands, K)) { std::puts("link"); return 1; }
-    u32 th[kMaxK];
-    if (!thetaMulti(K, P, th)) { std::puts("singular"); return 1; }
+    u32 th[kMaxK], dl[kMaxK][3];
+    if (!thetaMultiV3(K, P, th, dl)) { std::puts("singular"); return 1; }
     uint8_t h[32];
-    holocryptoHash(P, th, h);
-    for (int k = 0; k < P.K; ++k) std::printf("theta[%d]=%u  (T1=%u T2=%u)\n", k, th[k], P.T1[k], P.T2[k]);
+    if (v3) holocryptoHashV3(P, th, dl, h); else holocryptoHash(P, th, h);
+    for (int k = 0; k < P.K; ++k) {
+        std::printf("theta[%d]=%u  (T1=%u T2=%u)\n", k, th[k], P.T1[k], P.T2[k]);
+        if (v3) std::printf("delta[%d]=%u %u %u\n", k, dl[k][0], dl[k][1], dl[k][2]);
+    }
     std::printf("hash=%s\n", hex(h, 32).c_str());
     return 0;
 }
@@ -437,18 +488,35 @@ int main(int argc, char** argv) {
     Params P;
     std::vector<int> lens = {5, 6, 7, 8};
     std::string verifyWord;
+    bool v3 = false;                          // --v3: optional v3 digest, only meaningful with --verify
+    bool haveVerify = false;                  // --verify "" must be an error, not a silent benchmark run
     for (int a = 1; a < argc; ++a) {
         std::string k = argv[a];
         auto next = [&]() -> const char* { return a + 1 < argc ? argv[++a] : ""; };
-        if (k == "-t") threads = std::max(1, std::atoi(next()));
-        else if (k == "-k") P.K = std::min(kMaxK, std::max(1, std::atoi(next())));
-        else if (k == "--seed") P.seed = std::strtoull(next(), nullptr, 0);
-        else if (k == "--lens") lens = parseInts(next(), ',');
-        else if (k == "--verify") verifyWord = next();
+        std::vector<int> one;
+        if (k == "-t") { if (!parseIntList(next(), ',', 1, 256, "thread count", one) || one.size() != 1) return 2; threads = one[0]; }
+        else if (k == "-k") { if (!parseIntList(next(), ',', 1, kMaxK, "K", one) || one.size() != 1) return 2; P.K = one[0]; }
+        else if (k == "--seed") {
+            const char* t = next();
+            char* end = nullptr;
+            errno = 0;
+            u64 sv = std::strtoull(t, &end, 0);
+            // reject "", text, trailing junk, overflow and negative numbers (strtoull would wrap "-1" to 2^64-1)
+            if (end == t || *end != '\0' || errno == ERANGE || std::strchr(t, '-')) {
+                std::fprintf(stderr, "error: invalid seed '%s' (expected an unsigned 64-bit integer)\n", t);
+                return 2;
+            }
+            P.seed = sv;
+        }
+        else if (k == "--lens") { if (!parseIntList(next(), ',', 1, kMaxN, "length", lens) || lens.empty()) return 2; }
+        else if (k == "--verify") { verifyWord = next(); haveVerify = true; }
+        else if (k == "--v3") v3 = true;
         else if (k == "--selftest") return cmdSelftest();
+        else { std::fprintf(stderr, "error: unknown option '%s'\n", k.c_str()); return 2; }
     }
     P.derive();
-    if (!verifyWord.empty()) return cmdVerify(verifyWord, P);
+    if (v3 && !haveVerify) { std::fprintf(stderr, "error: --v3 only applies to --verify\n"); return 2; }
+    if (haveVerify) return cmdVerify(verifyWord, P, v3);
 
     std::printf("holocrypto_bench v2 | q=2^31-1 | K=%d points | seed=0x%llx | strands=%d | threads=%d\n", P.K,
                 (unsigned long long)P.seed, kStrands, threads);

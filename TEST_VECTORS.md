@@ -246,9 +246,50 @@ theta[15]=1575970006  (T1=377114959 T2=1751274819)
 hash=cf911bfca2310529f729da5c448eb43521ea84adbd57c1b199efac59fa0d09d7
 ```
 
+## 16. Optional v3 digest (also hashes Delta), basic knot
+
+Same thetas as vector 1; the digest additionally covers Delta(T1), Delta(T2), Delta(T3) at every point (domain tag `holocrypto-v3/alexander+theta`). `--v3` is available in `holocrypto_bench --verify` and as `digest_v3()` in `holocrypto_multipoint_ref.py`. It is NOT compatible with the v2 digest.
+
+```text
+$ holocrypto_bench.exe --verify "1 2 3 -1 2 1 3" --v3
+theta[0]=1883451254  (T1=1496904601 T2=1786645906)
+delta[0]=1591293422 1916820261 176665494
+theta[1]=260077083  (T1=735303977 T2=540787968)
+delta[1]=1600766336 1832627405 220704236
+theta[2]=1120809409  (T1=1585694247 T2=1330651864)
+delta[2]=196935894 670197625 449112320
+theta[3]=331051820  (T1=344924129 T2=330897688)
+delta[3]=160219798 679045985 481436476
+theta[4]=609041965  (T1=485100673 T2=294071181)
+delta[4]=1376054737 627497046 32518217
+theta[5]=642464363  (T1=784128092 T2=174060674)
+delta[5]=1831618166 377996248 913782138
+theta[6]=1355435651  (T1=2057504001 T2=2008740237)
+delta[6]=926917606 384896942 2054027017
+theta[7]=1742479061  (T1=1052497489 T2=1421887965)
+delta[7]=2022239209 1210956994 1710135237
+hash=84728485e27526d03bed5722c4e96e3d71f9937602242e5ec3ca01655b203063
+```
+
+## 17. v3 separates K # K* from the unknot
+
+The closure of `1 1 1 -2 -2 -2 3` is the trefoil connected-summed with its mirror image (K # K*). It has theta = 0 at every point, so its v2 digest equals the unknot digest of vector 8 (`0a61a9a2...`). With v3 the two digests differ (compare with the unknot below).
+
+```text
+$ holocrypto_bench.exe --verify "1 1 1 -2 -2 -2 3" --v3
+delta[0]=825545532 2086384406 1292308927
+hash=9551fecb5d73870813a6061e9a8b210c6f32873ce91a11449dadaf0e00adc544
+$ holocrypto_bench.exe --verify "1 2 3" --v3
+delta[0]=1 1 1
+hash=21c91e45048d44344280b40305a60ae2ac75374bb243b20a597d825d35a8856c
+```
+
+v3 does not help when the colliding knots share the same Delta (for instance Delta = 1 for Conway and Kinoshita-Terasaka), so connected sums such as `K0 # D # D*` stay invisible.
+
 ## Consistency checks that hold for these vectors
 
 - Vectors 1 and 2: `theta_mirror[k] = q - theta[k]` for every `k`.
 - Vectors 1, 5 and 6 are three diagrams of the same knot and give the same digest.
 - Vector 7 is rejected as a link; vectors 8 and 9 are rejected because `theta = 0` at all 8 points.
 - Vectors 10 and 11 (Conway / Kinoshita-Terasaka) have identical Alexander polynomial (`1`) and hyperbolic volume, yet all 8 thetas differ (`python mutant_test.py` checks this and the invariance under 60 rewritings of each word).
+- Vectors 16 and 17 are the optional v3 digest. Vector 17: the v2 digest of `1 1 1 -2 -2 -2 3` equals the unknot digest of vector 8, while the v3 digests differ. `python` and C++ agree on v3 (`digest_v3()` vs `--verify --v3`).
